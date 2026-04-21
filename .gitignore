@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Secrets / credentials – NEVER commit these
+clouds.yaml
+*openrc*
+*.pem
+*.key
+*.crt
+*.pfx
+*secret*
+*password*
+*credentials*
+
+# openstack-doctor outputs
+*.snapshot/
+report*.json
+report*.md
+
+# macOS
+.DS_Store
