@@ -22,13 +22,13 @@ import json
 import re
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any
 
 from openstack.connection import Connection
-
 
 # ---------------------------------------------------------------------------
 # Read-only guard
@@ -65,18 +65,26 @@ class GuardStats:
     blocked_calls: list[tuple[str, str]] = field(default_factory=list)
 
 
+_GUARD_INSTALLED_ATTR = "_openstack_doctor_guard_installed"
+
+
 def install_readonly_guard(conn: Connection, stats: GuardStats | None = None) -> GuardStats:
     """Wrap ``conn.session.request`` so that only safe HTTP methods pass.
 
     Must be called *after* the initial authentication so we don't block
     the very POST that fetches our token. Re-auth POSTs to ``/auth/tokens``
     are explicitly allowed.
+
+    Idempotent: re-installing on the same session is a no-op so wrapper
+    chains never double-stack and double-count.
     """
     stats = stats or GuardStats()
     session = conn.session
+    if getattr(session, _GUARD_INSTALLED_ATTR, False):
+        return stats
     original = session.request
 
-    def guarded(url, method, *args, **kwargs):  # type: ignore[no-untyped-def]
+    def guarded(url, method, *args, **kwargs):  # noqa: ANN001,ANN201
         m = (method or "GET").upper()
         url_str = str(url)
         if m in SAFE_HTTP_METHODS:
@@ -92,7 +100,8 @@ def install_readonly_guard(conn: Connection, stats: GuardStats | None = None) ->
             "this tool is strictly read-only."
         )
 
-    session.request = guarded  # type: ignore[assignment]
+    session.request = guarded  # type: ignore[method-assign]
+    setattr(session, _GUARD_INSTALLED_ATTR, True)
     return stats
 
 
@@ -120,19 +129,28 @@ class RateLimiter:
             self._last = time.monotonic()
 
 
+_RATE_LIMITER_INSTALLED_ATTR = "_openstack_doctor_rate_installed"
+
+
 def install_rate_limiter(conn: Connection, rps: float) -> RateLimiter | None:
-    """Insert a rate limiter in front of every HTTP request."""
+    """Insert a rate limiter in front of every HTTP request.
+
+    Idempotent across re-installs on the same session.
+    """
     if not rps or rps <= 0:
         return None
-    limiter = RateLimiter(rps)
     session = conn.session
+    if getattr(session, _RATE_LIMITER_INSTALLED_ATTR, False):
+        return None
+    limiter = RateLimiter(rps)
     original = session.request
 
-    def throttled(url, method, *args, **kwargs):  # type: ignore[no-untyped-def]
+    def throttled(url, method, *args, **kwargs):  # noqa: ANN001,ANN201
         limiter.wait()
         return original(url, method, *args, **kwargs)
 
-    session.request = throttled  # type: ignore[assignment]
+    session.request = throttled  # type: ignore[method-assign]
+    setattr(session, _RATE_LIMITER_INSTALLED_ATTR, True)
     return limiter
 
 
@@ -183,22 +201,35 @@ class Budget:
             self.tripped = True
 
 
+_BUDGET_INSTALLED_ATTR = "_openstack_doctor_budget_installed"
+
+
 def install_budget(conn: Connection, budget: Budget) -> Budget:
-    """Wrap ``session.request`` to enforce a global budget + circuit breaker."""
+    """Wrap ``session.request`` to enforce a global budget + circuit breaker.
+
+    Idempotent across re-installs on the same session.
+    """
     session = conn.session
+    if getattr(session, _BUDGET_INSTALLED_ATTR, False):
+        return budget
     original = session.request
 
-    def budgeted(url, method, *args, **kwargs):  # type: ignore[no-untyped-def]
+    def budgeted(url, method, *args, **kwargs):  # noqa: ANN001,ANN201
         budget.check()
         try:
             resp = original(url, method, *args, **kwargs)
+        except DryRunBlocked:
+            # Dry-run interception is not a real failure of the cloud, so
+            # do not count it toward the circuit breaker.
+            raise
         except Exception as exc:
             budget.record_failure(exc)
             raise
         budget.record_success()
         return resp
 
-    session.request = budgeted  # type: ignore[assignment]
+    session.request = budgeted  # type: ignore[method-assign]
+    setattr(session, _BUDGET_INSTALLED_ATTR, True)
     return budget
 
 
@@ -218,28 +249,55 @@ class DryRunRecorder:
     records: list[DryRunRecord] = field(default_factory=list)
 
 
-def install_dry_run(conn: Connection, recorder: DryRunRecorder) -> DryRunRecorder:
-    """Replace ``session.request`` so that *no* real call is sent.
+_DRY_RUN_INSTALLED_ATTR = "_openstack_doctor_dryrun_installed"
 
-    The very first call will be intercepted *after* authentication, so
-    the auth handshake still goes through. Anything afterwards records
-    its (method, url) and raises ``DryRunBlocked`` so the calling check
-    fails fast with a clear message instead of touching the cloud.
+
+def install_dry_run(conn: Connection, recorder: DryRunRecorder) -> DryRunRecorder:
+    """Insert a dry-run interceptor that records the attempt and raises.
+
+    IMPORTANT: this must be installed *before* the readonly guard / budget /
+    rate-limiter so it sits at the *bottom* of the wrapper chain. The chain
+    then becomes::
+
+        session.request -> guard -> budget -> rate_limiter -> dry_run -> (raise)
+
+    This way an SDK call still flows through the safety wrappers (counters
+    increment, write attempts are caught and reported as
+    ``WriteAttemptBlocked`` instead of silently turning into a dry-run
+    record) and only blocks at the very last step before any HTTP egress.
+
+    Idempotent across re-installs on the same session.
     """
     session = conn.session
+    if getattr(session, _DRY_RUN_INSTALLED_ATTR, False):
+        return recorder
 
-    def fake(url, method, *args, **kwargs):  # type: ignore[no-untyped-def]
-        recorder.records.append(DryRunRecord(method=str(method).upper(), url=str(url)))
-        raise DryRunBlocked(f"DRY-RUN: would have sent {method} {url}")
+    def fake(url, method, *args, **kwargs):  # noqa: ANN001,ANN201
+        m = str(method or "GET").upper()
+        url_str = str(url)
+        recorder.records.append(DryRunRecord(method=m, url=url_str))
+        raise DryRunBlocked(f"DRY-RUN: would have sent {m} {url_str}")
 
-    session.request = fake  # type: ignore[assignment]
+    session.request = fake  # type: ignore[method-assign]
+    setattr(session, _DRY_RUN_INSTALLED_ATTR, True)
     return recorder
 
 
+# Absolute fallback when the caller passes ``None`` or 0 ("unlimited"). We
+# still cap the iteration so a 50k-server cloud never blows up our memory or
+# our request budget. Tunable but conservative.
+ABSOLUTE_MAX_ITEMS = 5000
+
+
 def bounded_list(it: Iterable[Any], max_items: int | None) -> list[Any]:
-    """Materialise a generator with an upper bound."""
+    """Materialise a generator with an upper bound.
+
+    ``None`` or 0 falls back to :data:`ABSOLUTE_MAX_ITEMS` rather than truly
+    unlimited iteration. A truly unlimited list against a busy cloud is an
+    operational footgun.
+    """
     if max_items is None or max_items <= 0:
-        return list(it)
+        return list(islice(it, ABSOLUTE_MAX_ITEMS))
     return list(islice(it, max_items))
 
 
@@ -271,6 +329,9 @@ class Snapshot:
 
     def __init__(self, root: Path | None) -> None:
         self.root = root
+        # ``failures`` accumulates (key, exception_repr) pairs so the caller
+        # can surface them in the report instead of silently losing them.
+        self.failures: list[tuple[str, str]] = []
         if self.root:
             self.root.mkdir(parents=True, exist_ok=True)
 
@@ -284,8 +345,8 @@ class Snapshot:
                 json.dumps(payload, indent=2, ensure_ascii=False, default=str),
                 encoding="utf-8",
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            self.failures.append((key, f"{type(exc).__name__}: {exc}"))
 
 
 # ---------------------------------------------------------------------------
@@ -318,19 +379,3 @@ def redact_dict(d: Any, redact_ips: bool = False) -> Any:
     return d
 
 
-# ---------------------------------------------------------------------------
-# Iteration helpers
-# ---------------------------------------------------------------------------
-
-
-def safe_iter(getter, *args, **kwargs) -> Iterator[Any]:
-    """Yield from an SDK generator, swallowing per-item errors."""
-    try:
-        gen = getter(*args, **kwargs)
-    except Exception:
-        return
-    try:
-        for item in gen:
-            yield item
-    except Exception:
-        return

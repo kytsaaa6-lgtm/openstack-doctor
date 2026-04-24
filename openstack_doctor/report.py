@@ -29,7 +29,11 @@ SEVERITY_EMOJI = {
 }
 
 
-def to_console(report: DiagnosisReport, console: Console | None = None) -> None:
+def to_console(
+    report: DiagnosisReport,
+    console: Console | None = None,
+    redact_ips: bool = False,
+) -> None:
     console = console or Console()
 
     header = (
@@ -54,19 +58,22 @@ def to_console(report: DiagnosisReport, console: Console | None = None) -> None:
         )
     console.print(table)
 
+    def _maybe(s: str) -> str:
+        return redact_ipv4(s) if (redact_ips and s) else s
+
     for r in report.results:
         if not r.findings and not r.error:
             continue
         console.print(f"\n[bold]== {r.name} ==[/bold]")
         if r.error:
-            console.print(f"[red]error:[/red] {r.error}")
+            console.print(f"[red]error:[/red] {_maybe(r.error)}")
         for f in r.findings:
             sev_tag = f"[{SEVERITY_STYLE[f.severity]}]{SEVERITY_EMOJI[f.severity]}[/]"
             console.print(f"{sev_tag} [bold]{f.title}[/bold]")
             if f.resource:
-                console.print(f"   resource: {f.resource}")
+                console.print(f"   resource: {_maybe(f.resource)}")
             if f.detail:
-                for line in f.detail.splitlines()[:30]:
+                for line in _maybe(f.detail).splitlines()[:30]:
                     console.print(f"   {line}")
             if f.suggestion:
                 console.print(f"   [cyan]힌트:[/cyan] {f.suggestion}")
@@ -81,6 +88,25 @@ def to_json(report: DiagnosisReport, path: Path, redact_ips: bool = False) -> No
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _fence(text: str, lang: str = "") -> list[str]:
+    """Wrap ``text`` in a markdown code fence that won't be broken by inner ```.
+
+    Picks a fence longer than any backtick run found in ``text`` so logs
+    that legitimately contain triple-backticks (journalctl output, etc.)
+    can never escape the block.
+    """
+    longest = 0
+    run = 0
+    for ch in text:
+        if ch == "`":
+            run += 1
+            longest = max(longest, run)
+        else:
+            run = 0
+    fence = "`" * max(3, longest + 1)
+    return [f"{fence}{lang}", text, fence]
+
+
 def to_markdown(report: DiagnosisReport, path: Path, redact_ips: bool = False) -> None:
     lines: list[str] = []
     lines.append(f"# OpenStack Doctor Report - `{report.cloud}`")
@@ -92,7 +118,17 @@ def to_markdown(report: DiagnosisReport, path: Path, redact_ips: bool = False) -
     if report.context:
         lines.append("- context:")
         for k, v in report.context.items():
-            lines.append(f"  - `{k}`: `{v}`")
+            # dict/list values do not render well inside an inline-backtick
+            # span (and may contain backticks themselves). Render them as a
+            # nested fenced JSON block instead.
+            if isinstance(v, (dict, list)):
+                lines.append(f"  - `{k}`:")
+                lines.extend(
+                    "    " + ln
+                    for ln in _fence(json.dumps(v, indent=2, ensure_ascii=False, default=str), "json")
+                )
+            else:
+                lines.append(f"  - `{k}`: `{v}`")
     lines.append("")
 
     lines.append("## Summary")
@@ -108,7 +144,8 @@ def to_markdown(report: DiagnosisReport, path: Path, redact_ips: bool = False) -
     for r in report.results:
         lines.append(f"## {r.name}")
         if r.error:
-            lines.append(f"> ERROR: `{r.error}`")
+            err = redact_ipv4(r.error) if redact_ips else r.error
+            lines.append(f"> ERROR: `{err}`")
         if not r.findings:
             lines.append("- (no findings)")
             lines.append("")
@@ -122,17 +159,15 @@ def to_markdown(report: DiagnosisReport, path: Path, redact_ips: bool = False) -
                 detail = redact_ipv4(detail)
             if detail:
                 lines.append("")
-                lines.append("```")
-                lines.append(detail)
-                lines.append("```")
+                lines.extend(_fence(detail))
             if f.suggestion:
                 lines.append(f"- 힌트: {f.suggestion}")
             if f.evidence:
                 ev = redact_dict(f.evidence, redact_ips=redact_ips)
                 lines.append("- evidence:")
-                lines.append("```json")
-                lines.append(json.dumps(ev, indent=2, ensure_ascii=False, default=str))
-                lines.append("```")
+                lines.extend(
+                    _fence(json.dumps(ev, indent=2, ensure_ascii=False, default=str), "json")
+                )
             lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")

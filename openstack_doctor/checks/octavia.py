@@ -9,6 +9,12 @@ from ._util import skip_unavailable, timed
 
 PENDING_OPS = {"PENDING_CREATE", "PENDING_UPDATE", "PENDING_DELETE"}
 
+# Operating statuses that we treat as healthy enough not to warn about.
+# DRAINING and NO_MONITOR are not-OFFLINE-not-ERROR signals that legitimately
+# show up during normal cluster lifecycle. DEGRADED *is* a real warning so
+# it's intentionally absent.
+HEALTHY_MEMBER_STATUSES = {"ONLINE", "NO_MONITOR", "DRAINING"}
+
 
 def run(handle: CloudHandle, ctx: dict) -> CheckResult:
     if not handle.services.get("octavia", True):
@@ -19,18 +25,21 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
     max_items = ctx.get("max_items")
 
     with timed("octavia") as result:
-        try:
-            lbs = bounded_list(conn.load_balancer.load_balancers(), max_items)
-        except Exception as exc:
-            result.findings.append(
-                Finding(
-                    check="octavia",
-                    severity=Severity.INFO,
-                    title="Octavia 호출 실패 - 미설치/권한 문제 가능",
-                    detail=str(exc),
+        if handle.inventory is not None:
+            lbs = handle.inventory.load_balancers(max_items)
+        else:
+            try:
+                lbs = bounded_list(conn.load_balancer.load_balancers(), max_items)
+            except Exception as exc:
+                result.findings.append(
+                    Finding(
+                        check="octavia",
+                        severity=Severity.INFO,
+                        title="Octavia 호출 실패 - 미설치/권한 문제 가능",
+                        detail=str(exc),
+                    )
                 )
-            )
-            return result
+                return result
 
         target = (
             [lb for lb in lbs if (lb.name or "").startswith(name_prefix)]
@@ -102,7 +111,7 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
                     members = []
                 bad_members = [
                     m for m in members
-                    if (m.operating_status or "").upper() not in {"ONLINE", "NO_MONITOR"}
+                    if (m.operating_status or "").upper() not in HEALTHY_MEMBER_STATUSES
                 ]
                 if bad_members:
                     result.findings.append(

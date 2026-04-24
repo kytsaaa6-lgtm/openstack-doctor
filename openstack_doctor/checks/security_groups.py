@@ -77,7 +77,10 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
             )
             return result
 
-        sgs = bounded_list(conn.network.security_groups(), max_items)
+        if handle.inventory is not None:
+            sgs = handle.inventory.security_groups(max_items)
+        else:
+            sgs = bounded_list(conn.network.security_groups(), max_items)
         if not sgs:
             result.findings.append(
                 Finding(
@@ -90,10 +93,13 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
 
         target_sgs = sgs
         if name_prefix:
-            try:
-                servers = bounded_list(conn.compute.servers(details=True), max_items)
-            except Exception:
-                servers = []
+            if handle.inventory is not None:
+                servers = handle.inventory.servers(max_items)
+            else:
+                try:
+                    servers = bounded_list(conn.compute.servers(details=True), max_items)
+                except Exception:
+                    servers = []
             cluster_servers = [s for s in servers if (s.name or "").startswith(name_prefix)]
             sg_names: set[str] = set()
             for s in cluster_servers:

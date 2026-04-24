@@ -18,9 +18,73 @@ dependencies = [
     "paramiko>=3.4.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+    "mypy>=1.8",
+    "types-PyYAML",
+    "types-paramiko",
+]
+
 [project.scripts]
 openstack-doctor = "openstack_doctor.cli:app"
 osdoctor = "openstack_doctor.cli:app"
 
 [tool.setuptools.packages.find]
 include = ["openstack_doctor*"]
+
+# ----------------------------------------------------------------------------
+# pytest
+# ----------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+filterwarnings = [
+    # paramiko triggers CryptographyDeprecationWarning on some platforms;
+    # not actionable from this project.
+    "ignore::DeprecationWarning",
+]
+
+# ----------------------------------------------------------------------------
+# ruff (lint + format checks). Conservative rule set so CI doesn't
+# constantly fight legitimate openstacksdk-flavored code.
+# ----------------------------------------------------------------------------
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+extend-exclude = [".venv", ".venv-test", "build", "dist"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+]
+ignore = [
+    "E501",  # line length is enforced by formatter, not linter
+    "B008",  # function call as default arg -- typer Option uses this idiom
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]  # asserts are fine in tests
+
+# ----------------------------------------------------------------------------
+# mypy. Lenient on third-party SDK boundaries (openstacksdk lacks types),
+# strict on our own code-paths.
+# ----------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+files = ["openstack_doctor"]
+
+[[tool.mypy.overrides]]
+module = ["openstack.*", "paramiko.*", "rich.*", "yaml"]
+ignore_missing_imports = true

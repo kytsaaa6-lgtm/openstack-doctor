@@ -51,7 +51,10 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
             )
             return result
 
-        servers = bounded_list(handle.conn.compute.servers(details=True), max_items)
+        if handle.inventory is not None:
+            servers = handle.inventory.servers(max_items)
+        else:
+            servers = bounded_list(handle.conn.compute.servers(details=True), max_items)
         if name_prefix:
             servers = [s for s in servers if (s.name or "").startswith(name_prefix)]
 
@@ -81,16 +84,25 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
             )
 
         if handle.services.get("octavia", False):
-            try:
-                lbs = bounded_list(handle.conn.load_balancer.load_balancers(), max_items)
-            except Exception:
-                lbs = []
-            api_lbs = [
-                lb for lb in lbs
-                if (name_prefix and (lb.name or "").startswith(name_prefix))
-                or "api" in (lb.name or "").lower()
-                or "k8s" in (lb.name or "").lower()
-            ]
+            if handle.inventory is not None:
+                lbs = handle.inventory.load_balancers(max_items)
+            else:
+                try:
+                    lbs = bounded_list(handle.conn.load_balancer.load_balancers(), max_items)
+                except Exception:
+                    lbs = []
+            # If we have a name_prefix, trust it: LBs from other clusters
+            # that happen to have "api"/"k8s" in their name should NOT be
+            # mistaken for ours. Only fall back to the heuristic when no
+            # prefix is provided at all.
+            if name_prefix:
+                api_lbs = [lb for lb in lbs if (lb.name or "").startswith(name_prefix)]
+            else:
+                api_lbs = [
+                    lb for lb in lbs
+                    if "api" in (lb.name or "").lower()
+                    or "k8s" in (lb.name or "").lower()
+                ]
             for lb in api_lbs:
                 try:
                     listeners = bounded_list(
@@ -99,7 +111,7 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
                     )
                 except Exception:
                     listeners = []
-                ports = {l.protocol_port for l in listeners}
+                ports = {ln.protocol_port for ln in listeners}
                 if api_port not in ports:
                     result.findings.append(
                         Finding(
@@ -116,10 +128,13 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
                     )
 
         if handle.services.get("neutron", True) and name_prefix:
-            try:
-                sgs = bounded_list(handle.conn.network.security_groups(), max_items)
-            except Exception:
-                sgs = []
+            if handle.inventory is not None:
+                sgs = handle.inventory.security_groups(max_items)
+            else:
+                try:
+                    sgs = bounded_list(handle.conn.network.security_groups(), max_items)
+                except Exception:
+                    sgs = []
             sg_for_cluster = [g for g in sgs if name_prefix in (g.name or "")]
             if not sg_for_cluster:
                 result.findings.append(

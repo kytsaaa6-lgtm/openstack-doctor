@@ -24,8 +24,11 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
             return result
 
         max_items = ctx.get("max_items")
-        services = bounded_list(conn.identity.services(), max_items)
-        endpoints = bounded_list(conn.identity.endpoints(), max_items)
+        # We require Keystone v3 (set in auth.connect via identity_api_version
+        # default), whose proxy exposes services()/endpoints(). The proxy
+        # type is unioned with v2 in the SDK stubs, hence the type: ignore.
+        services = bounded_list(conn.identity.services(), max_items)  # type: ignore[union-attr]
+        endpoints = bounded_list(conn.identity.endpoints(), max_items)  # type: ignore[union-attr]
 
         present = sorted({s.type for s in services if s.type})
         result.findings.append(

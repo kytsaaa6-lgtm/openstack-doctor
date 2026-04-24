@@ -16,6 +16,12 @@ from ._util import skip_unavailable, timed
 STUCK_STATUSES = {"BUILD", "REBUILD", "RESIZE", "MIGRATING", "REBOOT", "HARD_REBOOT"}
 ERROR_STATUSES = {"ERROR"}
 
+# Cap the number of additional ``os-instance-actions`` lookups we issue per
+# run. Each ERROR/STUCK instance triggers one extra request, which can blow
+# the API budget on a large failed cluster. The first N are usually enough
+# to identify the root cause.
+MAX_ACTION_LOOKUPS = 10
+
 
 def _name_filter(servers, prefix: str | None):
     if not prefix:
@@ -49,8 +55,12 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
     snapshot = ctx.get("snapshot")
 
     with timed("nova") as result:
-        servers = bounded_list(conn.compute.servers(details=True), max_items)
+        if handle.inventory is not None:
+            servers = handle.inventory.servers(max_items)
+        else:
+            servers = bounded_list(conn.compute.servers(details=True), max_items)
         target = _name_filter(servers, name_prefix)
+        action_lookups = 0
 
         if snapshot:
             snapshot.save(
@@ -92,7 +102,10 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
             }
             if status in ERROR_STATUSES:
                 fault = (getattr(s, "fault", None) or {}).get("message")
-                last_action = _last_failed_action(conn, s.id)
+                last_action = None
+                if action_lookups < MAX_ACTION_LOOKUPS:
+                    last_action = _last_failed_action(conn, s.id)
+                    action_lookups += 1
                 if last_action:
                     evidence["last_failed_action"] = last_action
                 result.findings.append(
@@ -111,7 +124,9 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
                     )
                 )
             elif status in STUCK_STATUSES and s.task_state:
-                evidence["last_failed_action"] = _last_failed_action(conn, s.id)
+                if action_lookups < MAX_ACTION_LOOKUPS:
+                    evidence["last_failed_action"] = _last_failed_action(conn, s.id)
+                    action_lookups += 1
                 result.findings.append(
                     Finding(
                         check="nova",

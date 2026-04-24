@@ -25,7 +25,10 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
     max_items = ctx.get("max_items")
 
     with timed("flavors") as result:
-        flavors = bounded_list(conn.compute.flavors(details=True), max_items)
+        if handle.inventory is not None:
+            flavors = handle.inventory.flavors(max_items)
+        else:
+            flavors = bounded_list(conn.compute.flavors(details=True), max_items)
         by_name = {f.name: f for f in flavors}
         by_id = {f.id: f for f in flavors}
 
@@ -40,39 +43,56 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
                     )
                 )
 
-        try:
-            servers = bounded_list(conn.compute.servers(details=True), max_items)
-        except Exception:
-            servers = []
+        if handle.inventory is not None:
+            servers = handle.inventory.servers(max_items)
+        else:
+            try:
+                servers = bounded_list(conn.compute.servers(details=True), max_items)
+            except Exception:
+                servers = []
         if name_prefix:
             servers = [s for s in servers if (s.name or "").startswith(name_prefix)]
 
-        used: dict[str, int] = {}
+        # Resolve each instance's flavor reference to a canonical *name* when
+        # possible, so the evidence is consistently human-readable instead of
+        # mixing names and ids.
+        used_by_name: dict[str, int] = {}
+        unresolved: dict[str, int] = {}
         for s in servers:
             f = getattr(s, "flavor", None) or {}
-            ref = f.get("original_name") or f.get("id") or f.get("name")
-            if not ref:
-                continue
-            used[ref] = used.get(ref, 0) + 1
+            ref_name = f.get("original_name") or f.get("name")
+            ref_id = f.get("id")
+            resolved = None
+            if ref_name and ref_name in by_name:
+                resolved = ref_name
+            elif ref_id and ref_id in by_id:
+                resolved = by_id[ref_id].name or ref_id
+            if resolved:
+                used_by_name[resolved] = used_by_name.get(resolved, 0) + 1
+            else:
+                key = ref_name or ref_id or "<unknown>"
+                unresolved[key] = unresolved.get(key, 0) + 1
 
-        for ref, count in used.items():
-            if ref not in by_name and ref not in by_id:
-                result.findings.append(
-                    Finding(
-                        check="flavors",
-                        severity=Severity.WARN,
-                        title=f"클러스터가 사용중인 flavor 가 카탈로그에 없음: {ref}",
-                        detail=f"{count}개 인스턴스가 참조 중. 삭제됐거나 권한 밖입니다.",
-                    )
+        for ref, count in unresolved.items():
+            result.findings.append(
+                Finding(
+                    check="flavors",
+                    severity=Severity.WARN,
+                    title=f"클러스터가 사용중인 flavor 가 카탈로그에 없음: {ref}",
+                    detail=f"{count}개 인스턴스가 참조 중. 삭제됐거나 권한 밖입니다.",
                 )
+            )
 
         result.findings.append(
             Finding(
                 check="flavors",
                 severity=Severity.INFO,
                 title="flavor 수집 완료",
-                detail=f"카탈로그 {len(flavors)}개 / 사용중 {len(used)}종",
-                evidence={"used": used},
+                detail=(
+                    f"카탈로그 {len(flavors)}개 / 사용중 {len(used_by_name)}종"
+                    + (f" / 미식별 {len(unresolved)}종" if unresolved else "")
+                ),
+                evidence={"used": used_by_name, "unresolved": unresolved} if unresolved else {"used": used_by_name},
             )
         )
     return result

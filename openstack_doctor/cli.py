@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 import yaml
 from rich.console import Console
 
-from . import auth, cluster_readiness
+from . import __version__, auth, cluster_readiness
 from .checks import REGISTRY, available_checks
-from .models import DiagnosisReport, Severity, SEVERITY_ORDER
+from .models import SEVERITY_ORDER, DiagnosisReport, Severity
 from .nodes.collector import NodeRole, collect
 from .nodes.ssh import from_dict as ssh_from_dict
 from .report import to_console, to_json, to_markdown
@@ -36,6 +36,26 @@ SEVERITY_FROM_STR = {
     "error": Severity.ERROR,
     "critical": Severity.CRITICAL,
 }
+
+
+# Keys that the CLI populates explicitly. Anything in the YAML ``cluster:``
+# block with one of these names must NOT overwrite the CLI-resolved value
+# in ``_build_context``, otherwise yaml silently wins over an explicit CLI
+# argument (the opposite of the documented precedence).
+_RESERVED_CTX_KEYS = frozenset(
+    {
+        "name_prefix",
+        "image_name",
+        "api_port",
+        "expected_node_count",
+        "expected_nodes",
+        "quota_warn_ratio",
+        "expected_flavors",
+        "max_items",
+        "skip_sg_audit",
+        "snapshot",
+    }
+)
 
 
 def _build_context(
@@ -63,7 +83,12 @@ def _build_context(
         "snapshot": snapshot,
     }
     if extra:
-        ctx.update(extra)
+        for k, v in extra.items():
+            if k in _RESERVED_CTX_KEYS:
+                # CLI/explicit values already merged above; do not let
+                # the yaml block overwrite them.
+                continue
+            ctx[k] = v
     return ctx
 
 
@@ -78,18 +103,18 @@ def list_checks() -> None:
 
 @app.command()
 def diagnose(
-    cloud: Annotated[Optional[str], typer.Option(help="clouds.yaml 의 cloud 이름")] = None,
-    config: Annotated[Optional[Path], typer.Option(help="auth/노드/시나리오 정보를 담은 YAML")] = None,
-    region: Annotated[Optional[str], typer.Option(help="OpenStack region")] = None,
+    cloud: Annotated[str | None, typer.Option(help="clouds.yaml 의 cloud 이름")] = None,
+    config: Annotated[Path | None, typer.Option(help="auth/노드/시나리오 정보를 담은 YAML")] = None,
+    region: Annotated[str | None, typer.Option(help="OpenStack region")] = None,
     insecure: Annotated[bool, typer.Option(help="TLS 검증 비활성화")] = False,
-    only: Annotated[Optional[str], typer.Option(help="콤마로 구분된 체크만 실행")] = None,
-    skip: Annotated[Optional[str], typer.Option(help="콤마로 구분된 체크 제외")] = None,
-    name_prefix: Annotated[Optional[str], typer.Option(help="대상 클러스터 리소스 이름 prefix")] = None,
-    image_name: Annotated[Optional[str], typer.Option(help="kubespray 가 요구하는 Glance 이미지명")] = None,
+    only: Annotated[str | None, typer.Option(help="콤마로 구분된 체크만 실행")] = None,
+    skip: Annotated[str | None, typer.Option(help="콤마로 구분된 체크 제외")] = None,
+    name_prefix: Annotated[str | None, typer.Option(help="대상 클러스터 리소스 이름 prefix")] = None,
+    image_name: Annotated[str | None, typer.Option(help="kubespray 가 요구하는 Glance 이미지명")] = None,
     api_port: Annotated[int, typer.Option(help="k8s API 포트")] = 6443,
-    expected_nodes: Annotated[Optional[int], typer.Option(help="기대 노드 수")] = None,
+    expected_nodes: Annotated[int | None, typer.Option(help="기대 노드 수")] = None,
     expected_flavors: Annotated[
-        Optional[str], typer.Option(help="콤마로 구분된 기대 flavor 명들")
+        str | None, typer.Option(help="콤마로 구분된 기대 flavor 명들")
     ] = None,
     quota_warn_ratio: Annotated[float, typer.Option(help="쿼터 경고 임계 (0~1)")] = 0.85,
     skip_readiness: Annotated[bool, typer.Option(help="cluster_readiness 시나리오 룰 끄기")] = False,
@@ -115,16 +140,32 @@ def diagnose(
             help="인증 + 카탈로그 점검만 하고, 그 이후 실제 API 호출은 모두 차단/기록.",
         ),
     ] = False,
-    snapshot_dir: Annotated[Optional[Path], typer.Option("--snapshot", help="원본 응답 저장 폴더")] = None,
+    snapshot_dir: Annotated[Path | None, typer.Option("--snapshot", help="원본 응답 저장 폴더")] = None,
     redact: Annotated[bool, typer.Option(help="리포트에서 IP 및 비밀값 마스킹")] = False,
-    json_out: Annotated[Optional[Path], typer.Option("--json")] = None,
-    md_out: Annotated[Optional[Path], typer.Option("--markdown")] = None,
+    json_out: Annotated[Path | None, typer.Option("--json")] = None,
+    md_out: Annotated[Path | None, typer.Option("--markdown")] = None,
     no_console: Annotated[bool, typer.Option(help="콘솔 출력 끄기")] = False,
+    insecure_ssh: Annotated[
+        bool,
+        typer.Option(
+            "--insecure-ssh",
+            help="SSH 호스트키가 known_hosts 에 없어도 자동으로 신뢰 (MITM 위험, 명시적 opt-in).",
+        ),
+    ] = False,
     fail_on: Annotated[
         str, typer.Option(help="이 심각도 이상이면 비정상 종료")
     ] = "error",
 ) -> None:
     """OpenStack 진단을 수행합니다 (read-only)."""
+
+    # Validate --fail-on up front so a typo doesn't waste a full diagnosis run
+    # against a production cloud.
+    if fail_on.lower() not in SEVERITY_FROM_STR:
+        console.print(
+            f"[red]오류:[/red] --fail-on='{fail_on}' 는 알 수 없는 값입니다. "
+            f"허용값: {sorted(SEVERITY_FROM_STR)}"
+        )
+        raise typer.Exit(code=64)
 
     file_data: dict = {}
     extra_ctx: dict = {}
@@ -136,7 +177,11 @@ def diagnose(
             extra_ctx.update(kube_ctx)
             name_prefix = name_prefix or kube_ctx.get("name_prefix")
             image_name = image_name or kube_ctx.get("image_name")
-            if "api_port" in kube_ctx:
+            # Only let yaml override api_port if the CLI value is the default.
+            # Typer doesn't tell us "was this explicit?" so we use the default
+            # sentinel: 6443. Users who explicitly pass --api-port 6443 will
+            # still correctly take the CLI value because it equals the yaml.
+            if "api_port" in kube_ctx and api_port == 6443:
                 api_port = kube_ctx["api_port"]
             expected_nodes = expected_nodes or kube_ctx.get("expected_nodes")
             if not expected_flavors and kube_ctx.get("expected_flavors"):
@@ -177,6 +222,7 @@ def diagnose(
     cloud_label = handle.cloud_label
     report = DiagnosisReport(cloud=cloud_label)
     report.context = {
+        "tool_version": __version__,
         "name_prefix": name_prefix,
         "image_name": image_name,
         "api_port": api_port,
@@ -240,9 +286,23 @@ def diagnose(
     if nodes_cfg:
         console.log(f"SSH 노드 수집 ({len(nodes_cfg)}개)")
         for n in nodes_cfg:
-            target = ssh_from_dict(n["ssh"])
+            try:
+                ssh_dict = dict(n.get("ssh") or {})
+            except Exception:
+                console.log(f"[yellow]경고:[/yellow] node {n!r} 에 ssh 섹션이 없거나 잘못되어 건너뜁니다.")
+                continue
+            if insecure_ssh:
+                ssh_dict.setdefault("insecure_host_key", True)
+                if isinstance(ssh_dict.get("bastion"), dict):
+                    ssh_dict["bastion"].setdefault("insecure_host_key", True)
+            try:
+                target = ssh_from_dict(ssh_dict)
+            except ValueError as exc:
+                console.log(f"[yellow]경고:[/yellow] node {n.get('name')!r} ssh 설정 오류: {exc}")
+                continue
+            node_name = n.get("name") or ssh_dict.get("host") or "unknown"
             node = NodeRole(
-                name=n.get("name") or n["ssh"]["host"],
+                name=str(node_name),
                 target=target,
                 role=n.get("role", "custom"),
                 units=n.get("units"),
@@ -271,9 +331,15 @@ def diagnose(
         ]
     if aborted:
         report.context["aborted"] = True
+    if snapshot is not None and snapshot.failures:
+        report.context["snapshot_failures"] = snapshot.failures[:20]
+        console.log(
+            f"[yellow]주의:[/yellow] snapshot 저장 실패 {len(snapshot.failures)}건 - "
+            "리포트의 context.snapshot_failures 를 확인하세요."
+        )
 
     if not no_console:
-        to_console(report, console)
+        to_console(report, console, redact_ips=redact)
     if json_out:
         to_json(report, json_out, redact_ips=redact)
         console.log(f"JSON 리포트 저장: {json_out}")
@@ -281,14 +347,7 @@ def diagnose(
         to_markdown(report, md_out, redact_ips=redact)
         console.log(f"Markdown 리포트 저장: {md_out}")
 
-    key = fail_on.lower()
-    if key not in SEVERITY_FROM_STR:
-        console.print(
-            f"[yellow]경고:[/yellow] --fail-on='{fail_on}' 는 알 수 없는 값입니다. "
-            f"허용값: {sorted(SEVERITY_FROM_STR)}"
-        )
-        raise typer.Exit(code=64)
-    fail_threshold = SEVERITY_FROM_STR[key]
+    fail_threshold = SEVERITY_FROM_STR[fail_on.lower()]
     if SEVERITY_ORDER[report.worst_severity] >= SEVERITY_ORDER[fail_threshold]:
         raise typer.Exit(code=2)
 
@@ -298,14 +357,21 @@ def collect_node(
     host: Annotated[str, typer.Option(help="대상 호스트")],
     user: Annotated[str, typer.Option(help="SSH 유저")] = "root",
     port: Annotated[int, typer.Option(help="SSH 포트")] = 22,
-    key: Annotated[Optional[Path], typer.Option(help="SSH 키 파일")] = None,
+    key: Annotated[Path | None, typer.Option(help="SSH 키 파일")] = None,
     role: Annotated[str, typer.Option(help="controller|compute|k8s|custom")] = "custom",
-    units: Annotated[Optional[str], typer.Option(help="콤마로 구분된 systemd 유닛")] = None,
-    bastion_host: Annotated[Optional[str], typer.Option(help="Bastion 호스트")] = None,
-    bastion_user: Annotated[Optional[str], typer.Option()] = None,
-    bastion_key: Annotated[Optional[Path], typer.Option()] = None,
-    json_out: Annotated[Optional[Path], typer.Option("--json")] = None,
+    units: Annotated[str | None, typer.Option(help="콤마로 구분된 systemd 유닛")] = None,
+    bastion_host: Annotated[str | None, typer.Option(help="Bastion 호스트")] = None,
+    bastion_user: Annotated[str | None, typer.Option()] = None,
+    bastion_key: Annotated[Path | None, typer.Option()] = None,
+    json_out: Annotated[Path | None, typer.Option("--json")] = None,
     redact: Annotated[bool, typer.Option(help="IP 마스킹")] = False,
+    insecure_ssh: Annotated[
+        bool,
+        typer.Option(
+            "--insecure-ssh",
+            help="SSH 호스트키가 known_hosts 에 없어도 자동으로 신뢰 (MITM 위험, 명시적 opt-in).",
+        ),
+    ] = False,
 ) -> None:
     """단일 노드에 SSH 로 접속해 systemd/journal/MTU/NTP/conntrack 을 수집합니다."""
     bastion = None
@@ -314,6 +380,7 @@ def collect_node(
             "host": bastion_host,
             "user": bastion_user or "root",
             "key_filename": str(bastion_key) if bastion_key else None,
+            "insecure_host_key": insecure_ssh,
         }
     target = ssh_from_dict(
         {
@@ -322,6 +389,7 @@ def collect_node(
             "port": port,
             "key_filename": str(key) if key else None,
             "bastion": bastion,
+            "insecure_host_key": insecure_ssh,
         }
     )
     unit_list = [u.strip() for u in units.split(",")] if units else None
@@ -331,7 +399,7 @@ def collect_node(
     report = DiagnosisReport(cloud=f"node:{host}")
     report.results.append(result)
     report.finished_at = datetime.now(timezone.utc)
-    to_console(report, console)
+    to_console(report, console, redact_ips=redact)
     if json_out:
         to_json(report, json_out, redact_ips=redact)
 

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
 
 from ..models import CheckResult, Finding, Severity
 from ..safety import BudgetExceeded, CircuitOpen, DryRunBlocked, WriteAttemptBlocked
