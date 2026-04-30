@@ -60,6 +60,7 @@ _RESERVED_CTX_KEYS = frozenset(
         "required_vcpus",
         "required_ram_mb",
         "min_free_fips",
+        "amphora_image_tag",
     }
 )
 
@@ -81,6 +82,7 @@ def _build_context(
     required_vcpus: int | None = None,
     required_ram_mb: int | None = None,
     min_free_fips: int = 1,
+    amphora_image_tag: str = "amphora",
     extra: dict | None = None,
 ) -> dict:
     ctx: dict = {
@@ -99,6 +101,7 @@ def _build_context(
         "required_vcpus": required_vcpus,
         "required_ram_mb": required_ram_mb,
         "min_free_fips": min_free_fips,
+        "amphora_image_tag": amphora_image_tag,
     }
     if extra:
         for k, v in extra.items():
@@ -141,6 +144,9 @@ def diagnose(
     required_vcpus: Annotated[int | None, typer.Option(help="클러스터 배포에 필요한 최소 여유 vCPU 수")] = None,
     required_ram_mb: Annotated[int | None, typer.Option(help="클러스터 배포에 필요한 최소 여유 RAM(MB)")] = None,
     min_free_fips: Annotated[int, typer.Option(help="최소 여유 Floating IP 수 (미달 시 ERROR)")] = 1,
+    amphora_image_tag: Annotated[
+        str, typer.Option(help="Octavia amphora 이미지의 Glance 태그 (octavia.conf amp_image_tag 와 일치시킬 것)")
+    ] = "amphora",
     skip_readiness: Annotated[bool, typer.Option(help="cluster_readiness 시나리오 룰 끄기")] = False,
     skip_sg_audit: Annotated[bool, typer.Option(help="security_groups 권장 포트 audit 끄기")] = False,
     rps: Annotated[float, typer.Option(help="초당 요청 상한 (0=제한 없음)")] = 2.0,
@@ -219,6 +225,7 @@ def diagnose(
                 required_ram_mb = int(kube_ctx["required_ram_mb"])
             if kube_ctx.get("min_free_fips") is not None:
                 min_free_fips = int(kube_ctx["min_free_fips"])
+            amphora_image_tag = kube_ctx.get("amphora_image_tag", amphora_image_tag)
         nodes_cfg = file_data.get("nodes") or []
 
     if polite:
@@ -300,6 +307,7 @@ def diagnose(
         required_vcpus=required_vcpus,
         required_ram_mb=required_ram_mb,
         min_free_fips=min_free_fips,
+        amphora_image_tag=amphora_image_tag,
         extra=extra_ctx,
     )
 

@@ -32,6 +32,7 @@ cluster:
   required_vcpus: 40             # 클러스터 전체 배포에 필요한 최소 여유 vCPU 수
   required_ram_mb: 81920         # 클러스터 전체 배포에 필요한 최소 여유 RAM (MB, 예: 80GB)
   min_free_fips: 3               # 최소 여유 Floating IP 수 (미달 시 ERROR)
+  amphora_image_tag: amphora     # Octavia amphora 이미지의 Glance 태그 (octavia.conf amp_image_tag 와 동일하게)
 
 # (선택) SSH 정보가 있을 때만 노드 진단을 수행합니다.
 # 이 섹션이 없거나 비어 있으면 OpenStack API 만으로 진단합니다.

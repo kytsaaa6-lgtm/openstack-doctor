@@ -94,6 +94,7 @@ openstack-doctor diagnose \
   --required-vcpus 40 \
   --required-ram-mb 81920 \
   --min-free-fips 3 \
+  --amphora-image-tag amphora \
   --markdown report.md --json report.json
 ```
 
@@ -137,7 +138,8 @@ openstack-doctor collect-node \
 - **Octavia** *(미설치면 자동 skip)*
   - LB `PENDING_*` 고착, `ERROR`, 멤버 헬스체크 실패, 풀/리스너 누락
   - **Provider 등록 여부**: 사용 가능한 LB provider 가 없으면 WARN (octavia-worker 장애 징후)
-  - **Amphora 상태**: ERROR/PENDING_CREATE 고착 amphora 감지 (admin 권한 필요; 권한 부족 시 graceful skip)
+  - **Amphora Glance 이미지**: `--amphora-image-tag`(기본 `amphora`) 태그로 이미지가 존재·ACTIVE 인지 확인. 없거나 전부 비활성이면 CRITICAL — 이 경우 신규 LB 생성이 100% 실패함
+  - **Amphora 인스턴스 상태**: ERROR/PENDING_CREATE 고착 amphora 감지 (admin 권한 필요; 권한 부족 시 graceful skip)
 - **Heat** *(미설치면 자동 skip)*
   - 스택 `*_FAILED` / `*_IN_PROGRESS` 고착
 - **Quota**
