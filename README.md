@@ -88,6 +88,12 @@ openstack-doctor diagnose \
   --image-name ubuntu-22.04 \
   --expected-nodes 6 \
   --expected-flavors k8s.master,k8s.worker \
+  --availability-zone nova \
+  --external-network public \
+  --volume-type ceph-ssd \
+  --required-vcpus 40 \
+  --required-ram-mb 81920 \
+  --min-free-fips 3 \
   --markdown report.md --json report.json
 ```
 
@@ -117,18 +123,26 @@ openstack-doctor collect-node \
 - **Nova**
   - `ERROR` / `BUILD` 고착 인스턴스 + 해당 인스턴스의 `server actions` 마지막 실패 메시지까지 함께 출력 (가장 결정적인 단서)
   - `nova-compute` 다운, 하이퍼바이저 down/disabled
+  - **AZ 가용성**: `--availability-zone` 으로 지정한 AZ 가 존재하고 `available=True` 인지 확인
+  - **하이퍼바이저 가용 용량**: `--required-vcpus` / `--required-ram-mb` 와 비교해 클러스터 배포 전에 자원 부족 사전 감지
 - **Neutron**
   - 인스턴스 포트 `DOWN`, agent dead, 라우터 비정상, FIP 비정상
+  - **External network 가용성**: `--external-network` 으로 지정한 네트워크가 존재하고 ACTIVE 인지 확인; 미지정 시 external 네트워크 부재 여부를 감지
+  - **Floating IP 풀 여유**: 할당 가능 FIP 수가 `--min-free-fips` (기본 1) 미만이면 ERROR
 - **Cinder**
   - 볼륨 `error*` / `attaching` 고착, cinder 서비스 down
+  - **Volume type 가용성**: `--volume-type` 으로 지정한 Cinder volume type 이 존재하는지 확인 (미존재 시 ERROR)
 - **Glance**
   - 필요한 이미지 부재/비활성, private 이미지 가시성, 비표준 disk_format, SCSI 디스크 버스 등 cloud-init 호환성
 - **Octavia** *(미설치면 자동 skip)*
   - LB `PENDING_*` 고착, `ERROR`, 멤버 헬스체크 실패, 풀/리스너 누락
+  - **Provider 등록 여부**: 사용 가능한 LB provider 가 없으면 WARN (octavia-worker 장애 징후)
+  - **Amphora 상태**: ERROR/PENDING_CREATE 고착 amphora 감지 (admin 권한 필요; 권한 부족 시 graceful skip)
 - **Heat** *(미설치면 자동 skip)*
   - 스택 `*_FAILED` / `*_IN_PROGRESS` 고착
 - **Quota**
   - cores / RAM / instances / ports / floatingips / SG 룰 임계 초과
+  - **Octavia 쿼터**: load_balancer / listener / pool / member / health_monitor 쿼터 0 또는 초과 감지
 - **Flavors**
   - 기대 flavor 부재, 기존 인스턴스가 참조하는 flavor 가 카탈로그에 없는 경우
 - **SecurityGroups**
@@ -194,4 +208,4 @@ pytest -ra           # 회귀 테스트 (tests/)
 - placement / cells_v2 mapping 일관성 점검
 - 두 시점 리포트 `diff` (“언제부터 망가졌나”)
 - Slack / GitLab MR 자동 코멘트 (CI 의 `--fail-on` 와 결합)
-- amphora 인스턴스 자동 추적 (Octavia → Nova 교차)
+- Amphora → Nova 인스턴스 교차 추적 (amphora compute_id 로 Nova 인스턴스 직접 조회)

@@ -105,4 +105,57 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
                         detail=f"state={svc.state}",
                     )
                 )
+
+        # Volume type 가용성 체크
+        required_volume_type = ctx.get("volume_type")
+        try:
+            vtypes = bounded_list(conn.block_storage.types(), max_items)
+        except Exception:
+            vtypes = []
+
+        if vtypes:
+            vtype_names = [getattr(vt, "name", None) or getattr(vt, "id", "?") for vt in vtypes]
+            result.findings.append(
+                Finding(
+                    check="cinder",
+                    severity=Severity.INFO,
+                    title="Volume type 목록",
+                    detail=f"{len(vtypes)}개: {vtype_names[:10]}",
+                )
+            )
+            if required_volume_type:
+                matched = [vt for vt in vtypes if getattr(vt, "name", None) == required_volume_type]
+                if not matched:
+                    result.findings.append(
+                        Finding(
+                            check="cinder",
+                            severity=Severity.ERROR,
+                            title=f"지정 Volume type 없음: {required_volume_type}",
+                            detail=f"가용 타입: {vtype_names[:10]}",
+                            suggestion=(
+                                f"config 의 volume_type='{required_volume_type}' 이 "
+                                "이 클라우드에 존재하지 않습니다. "
+                                "`openstack volume type list` 로 올바른 이름을 확인하세요."
+                            ),
+                        )
+                    )
+                else:
+                    result.findings.append(
+                        Finding(
+                            check="cinder",
+                            severity=Severity.INFO,
+                            title=f"지정 Volume type 확인: {required_volume_type}",
+                            detail="존재함",
+                            resource=matched[0].id,
+                        )
+                    )
+        elif required_volume_type:
+            result.findings.append(
+                Finding(
+                    check="cinder",
+                    severity=Severity.WARN,
+                    title="Volume type 목록 조회 실패",
+                    detail="volume type 리스트를 가져올 수 없어 지정 타입 확인 불가",
+                )
+            )
     return result

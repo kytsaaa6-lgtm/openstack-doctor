@@ -146,6 +146,9 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
             hypervisors = bounded_list(conn.compute.hypervisors(details=True), max_items)
         except Exception:
             hypervisors = []
+
+        free_vcpus_total = 0
+        free_ram_mb_total = 0
         for h in hypervisors:
             state = getattr(h, "state", None)
             status = getattr(h, "status", None)
@@ -158,6 +161,47 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
                         detail=f"state={state}, status={status}",
                         resource=h.id,
                         suggestion="해당 컴퓨트 노드의 nova-compute 서비스와 메시지 큐 연결을 확인하세요.",
+                    )
+                )
+            else:
+                free_vcpus_total += (getattr(h, "vcpus", 0) or 0) - (getattr(h, "vcpus_used", 0) or 0)
+                free_ram_mb_total += getattr(h, "free_ram_mb", 0) or 0
+
+        required_vcpus = ctx.get("required_vcpus")
+        required_ram_mb = ctx.get("required_ram_mb")
+        if hypervisors:
+            result.findings.append(
+                Finding(
+                    check="nova",
+                    severity=Severity.INFO,
+                    title="하이퍼바이저 가용 자원",
+                    detail=f"여유 vCPU {free_vcpus_total}개 / 여유 RAM {free_ram_mb_total}MB (활성 하이퍼바이저 합산)",
+                )
+            )
+            if required_vcpus is not None and free_vcpus_total < int(required_vcpus):
+                result.findings.append(
+                    Finding(
+                        check="nova",
+                        severity=Severity.ERROR,
+                        title="하이퍼바이저 vCPU 부족",
+                        detail=f"여유 {free_vcpus_total}개 < 요구 {required_vcpus}개",
+                        suggestion=(
+                            "컴퓨트 노드 추가 또는 프로젝트 쿼터 증설이 필요합니다. "
+                            "또는 CPU overcommit 비율(cpu_allocation_ratio)을 확인하세요."
+                        ),
+                    )
+                )
+            if required_ram_mb is not None and free_ram_mb_total < int(required_ram_mb):
+                result.findings.append(
+                    Finding(
+                        check="nova",
+                        severity=Severity.ERROR,
+                        title="하이퍼바이저 RAM 부족",
+                        detail=f"여유 {free_ram_mb_total}MB < 요구 {required_ram_mb}MB",
+                        suggestion=(
+                            "컴퓨트 노드 추가 또는 프로젝트 쿼터 증설이 필요합니다. "
+                            "또는 RAM overcommit 비율(ram_allocation_ratio)을 확인하세요."
+                        ),
                     )
                 )
 
@@ -179,4 +223,56 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
                         ),
                     )
                 )
+
+        # AZ 가용성 체크
+        availability_zone = ctx.get("availability_zone")
+        try:
+            azs = bounded_list(conn.compute.availability_zones(), max_items)
+        except Exception:
+            azs = []
+        if azs:
+            available_az_names = {
+                az.name for az in azs if getattr(az, "state", {}).get("available", True)
+            }
+            unavailable_azs = [
+                az for az in azs if not getattr(az, "state", {}).get("available", True)
+            ]
+            for az in unavailable_azs:
+                result.findings.append(
+                    Finding(
+                        check="nova",
+                        severity=Severity.ERROR,
+                        title=f"AZ 사용 불가: {az.name}",
+                        detail="available=False",
+                        suggestion=(
+                            "해당 AZ 에 속한 nova-compute 서비스 상태와 "
+                            "nova-conductor 로그를 확인하세요."
+                        ),
+                    )
+                )
+            if availability_zone:
+                if availability_zone not in available_az_names:
+                    all_az_names = {az.name for az in azs}
+                    sev = Severity.ERROR if availability_zone not in all_az_names else Severity.CRITICAL
+                    result.findings.append(
+                        Finding(
+                            check="nova",
+                            severity=sev,
+                            title=f"지정 AZ 없음 또는 사용 불가: {availability_zone}",
+                            detail=f"가용 AZ 목록: {sorted(available_az_names)}",
+                            suggestion=(
+                                f"config 의 availability_zone='{availability_zone}' 이 "
+                                "실제 클라우드에 존재하고 available=True 인지 확인하세요."
+                            ),
+                        )
+                    )
+                else:
+                    result.findings.append(
+                        Finding(
+                            check="nova",
+                            severity=Severity.INFO,
+                            title=f"지정 AZ 정상 확인: {availability_zone}",
+                            detail="available=True",
+                        )
+                    )
     return result

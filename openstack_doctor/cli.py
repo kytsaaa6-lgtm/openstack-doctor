@@ -54,6 +54,12 @@ _RESERVED_CTX_KEYS = frozenset(
         "max_items",
         "skip_sg_audit",
         "snapshot",
+        "availability_zone",
+        "external_network",
+        "volume_type",
+        "required_vcpus",
+        "required_ram_mb",
+        "min_free_fips",
     }
 )
 
@@ -69,6 +75,12 @@ def _build_context(
     max_items: int | None,
     skip_sg_audit: bool,
     snapshot: Snapshot | None,
+    availability_zone: str | None = None,
+    external_network: str | None = None,
+    volume_type: str | None = None,
+    required_vcpus: int | None = None,
+    required_ram_mb: int | None = None,
+    min_free_fips: int = 1,
     extra: dict | None = None,
 ) -> dict:
     ctx: dict = {
@@ -81,6 +93,12 @@ def _build_context(
         "max_items": max_items,
         "skip_sg_audit": skip_sg_audit,
         "snapshot": snapshot,
+        "availability_zone": availability_zone,
+        "external_network": external_network,
+        "volume_type": volume_type,
+        "required_vcpus": required_vcpus,
+        "required_ram_mb": required_ram_mb,
+        "min_free_fips": min_free_fips,
     }
     if extra:
         for k, v in extra.items():
@@ -117,6 +135,12 @@ def diagnose(
         str | None, typer.Option(help="콤마로 구분된 기대 flavor 명들")
     ] = None,
     quota_warn_ratio: Annotated[float, typer.Option(help="쿼터 경고 임계 (0~1)")] = 0.85,
+    availability_zone: Annotated[str | None, typer.Option(help="배포 대상 AZ 이름 (미지정 시 전체 AZ 상태만 점검)")] = None,
+    external_network: Annotated[str | None, typer.Option(help="Floating IP 용 External network 이름")] = None,
+    volume_type: Annotated[str | None, typer.Option(help="사용할 Cinder volume type 이름")] = None,
+    required_vcpus: Annotated[int | None, typer.Option(help="클러스터 배포에 필요한 최소 여유 vCPU 수")] = None,
+    required_ram_mb: Annotated[int | None, typer.Option(help="클러스터 배포에 필요한 최소 여유 RAM(MB)")] = None,
+    min_free_fips: Annotated[int, typer.Option(help="최소 여유 Floating IP 수 (미달 시 ERROR)")] = 1,
     skip_readiness: Annotated[bool, typer.Option(help="cluster_readiness 시나리오 룰 끄기")] = False,
     skip_sg_audit: Annotated[bool, typer.Option(help="security_groups 권장 포트 audit 끄기")] = False,
     rps: Annotated[float, typer.Option(help="초당 요청 상한 (0=제한 없음)")] = 2.0,
@@ -186,6 +210,15 @@ def diagnose(
             expected_nodes = expected_nodes or kube_ctx.get("expected_nodes")
             if not expected_flavors and kube_ctx.get("expected_flavors"):
                 expected_flavors = ",".join(kube_ctx["expected_flavors"])
+            availability_zone = availability_zone or kube_ctx.get("availability_zone")
+            external_network = external_network or kube_ctx.get("external_network")
+            volume_type = volume_type or kube_ctx.get("volume_type")
+            if required_vcpus is None and kube_ctx.get("required_vcpus") is not None:
+                required_vcpus = int(kube_ctx["required_vcpus"])
+            if required_ram_mb is None and kube_ctx.get("required_ram_mb") is not None:
+                required_ram_mb = int(kube_ctx["required_ram_mb"])
+            if kube_ctx.get("min_free_fips") is not None:
+                min_free_fips = int(kube_ctx["min_free_fips"])
         nodes_cfg = file_data.get("nodes") or []
 
     if polite:
@@ -261,6 +294,12 @@ def diagnose(
         max_items=max_items if max_items > 0 else None,
         skip_sg_audit=skip_sg_audit,
         snapshot=snapshot,
+        availability_zone=availability_zone,
+        external_network=external_network,
+        volume_type=volume_type,
+        required_vcpus=required_vcpus,
+        required_ram_mb=required_ram_mb,
+        min_free_fips=min_free_fips,
         extra=extra_ctx,
     )
 

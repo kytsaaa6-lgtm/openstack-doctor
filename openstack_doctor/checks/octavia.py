@@ -8,6 +8,8 @@ from ..safety import bounded_list
 from ._util import skip_unavailable, timed
 
 PENDING_OPS = {"PENDING_CREATE", "PENDING_UPDATE", "PENDING_DELETE"}
+AMPHORA_ERROR_STATUSES = {"ERROR", "DELETED"}
+AMPHORA_DEGRADED_STATUSES = {"PENDING_CREATE", "PENDING_DELETE", "BOOTING", "ALLOCATED"}
 
 # Operating statuses that we treat as healthy enough not to warn about.
 # DRAINING and NO_MONITOR are not-OFFLINE-not-ERROR signals that legitimately
@@ -25,6 +27,100 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
     max_items = ctx.get("max_items")
 
     with timed("octavia") as result:
+        # Octavia provider/worker 서비스 가용 여부 확인
+        try:
+            providers = bounded_list(conn.load_balancer.providers(), max_items)
+        except Exception:
+            providers = []
+        if not providers:
+            result.findings.append(
+                Finding(
+                    check="octavia",
+                    severity=Severity.WARN,
+                    title="Octavia provider 조회 실패 또는 미설정",
+                    detail="load balancer provider 목록을 가져올 수 없습니다.",
+                    suggestion=(
+                        "octavia-api 서비스가 정상 동작하는지, "
+                        "octavia-worker / octavia-housekeeping 이 살아있는지 확인하세요."
+                    ),
+                )
+            )
+        else:
+            result.findings.append(
+                Finding(
+                    check="octavia",
+                    severity=Severity.INFO,
+                    title="Octavia provider 확인",
+                    detail=f"등록된 provider: {[p.name for p in providers]}",
+                )
+            )
+
+        # Amphora 상태 점검 (admin-only API; 권한 부족 시 graceful skip)
+        try:
+            amphorae = bounded_list(conn.load_balancer.amphorae(), max_items)
+            error_amp = [
+                a for a in amphorae
+                if (getattr(a, "status", "") or "").upper() in AMPHORA_ERROR_STATUSES
+            ]
+            degraded_amp = [
+                a for a in amphorae
+                if (getattr(a, "status", "") or "").upper() in AMPHORA_DEGRADED_STATUSES
+            ]
+            result.findings.append(
+                Finding(
+                    check="octavia",
+                    severity=Severity.INFO,
+                    title="Amphora 수집",
+                    detail=(
+                        f"전체 {len(amphorae)}개 / ERROR {len(error_amp)}개 "
+                        f"/ 진행중 {len(degraded_amp)}개"
+                    ),
+                )
+            )
+            for a in error_amp[:20]:
+                result.findings.append(
+                    Finding(
+                        check="octavia",
+                        severity=Severity.CRITICAL,
+                        title=f"Amphora ERROR: {a.id[:8]}",
+                        detail=(
+                            f"status={getattr(a, 'status', '?')}, "
+                            f"lb_id={getattr(a, 'loadbalancer_id', '?')}"
+                        ),
+                        resource=getattr(a, "compute_id", None),
+                        suggestion=(
+                            "해당 amphora Nova 인스턴스가 ERROR 상태인지 확인하세요. "
+                            "octavia-housekeeping 이 자동 교체를 시도해야 하며, "
+                            "교체가 막혀 있다면 Nova/Glance 쪽 오류를 함께 확인하세요."
+                        ),
+                    )
+                )
+            for a in degraded_amp[:10]:
+                result.findings.append(
+                    Finding(
+                        check="octavia",
+                        severity=Severity.WARN,
+                        title=f"Amphora 진행중 고착 의심: {a.id[:8]}",
+                        detail=(
+                            f"status={getattr(a, 'status', '?')}, "
+                            f"lb_id={getattr(a, 'loadbalancer_id', '?')}"
+                        ),
+                        suggestion=(
+                            "Nova 인스턴스 상태(BUILD 고착)와 octavia-worker 로그를 확인하세요."
+                        ),
+                    )
+                )
+        except Exception as amp_exc:
+            result.findings.append(
+                Finding(
+                    check="octavia",
+                    severity=Severity.INFO,
+                    title="Amphora 조회 불가 (권한 부족 가능)",
+                    detail=str(amp_exc),
+                    suggestion="admin 권한이 없으면 amphora 엔드포인트는 403 을 반환합니다.",
+                )
+            )
+
         if handle.inventory is not None:
             lbs = handle.inventory.load_balancers(max_items)
         else:
