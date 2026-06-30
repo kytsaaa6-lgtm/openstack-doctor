@@ -122,7 +122,7 @@ def run(handle: CloudHandle, ctx: dict) -> CheckResult:
                         continue
                     # Octavia quota API does not return "used" in the same payload.
                     # We estimate used from the inventory when available.
-                    used: int | None = None
+                    used = None
                     if attr_name == "load_balancer" and handle.inventory is not None:
                         try:
                             lbs = handle.inventory.load_balancers(ctx.get("max_items"))

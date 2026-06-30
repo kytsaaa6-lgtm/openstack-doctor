@@ -11,6 +11,7 @@ import yaml
 from rich.console import Console
 
 from . import __version__, auth, cluster_readiness
+from . import diff as diffmod
 from .checks import REGISTRY, available_checks
 from .models import SEVERITY_ORDER, DiagnosisReport, Severity
 from .nodes.collector import NodeRole, collect
@@ -449,6 +450,63 @@ def collect_node(
     to_console(report, console, redact_ips=redact)
     if json_out:
         to_json(report, json_out, redact_ips=redact)
+
+
+@app.command()
+def diff(
+    old: Annotated[Path, typer.Argument(help="기준(이전) JSON 리포트 - diagnose --json 으로 저장한 파일")],
+    new: Annotated[Path, typer.Argument(help="현재(최신) JSON 리포트")],
+    json_out: Annotated[Path | None, typer.Option("--json", help="diff 결과를 JSON 으로 저장")] = None,
+    md_out: Annotated[Path | None, typer.Option("--markdown", help="diff 결과를 Markdown 으로 저장")] = None,
+    no_console: Annotated[bool, typer.Option(help="콘솔 출력 끄기")] = False,
+    redact: Annotated[bool, typer.Option(help="리포트에서 IP 마스킹")] = False,
+    fail_on_regression: Annotated[
+        str | None,
+        typer.Option(
+            help=(
+                "이 심각도 이상으로 '새로 악화'된 항목이 있으면 비정상 종료(코드 2). "
+                "예: warn|error|critical. 미지정 시 항상 0 종료."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """두 리포트를 비교해 '언제부터 망가졌나'(severity 전이/신규/해소)를 보여줍니다.
+
+    OpenStack 호출 없이 로컬 JSON 파일만 읽으므로 항상 안전합니다.
+    """
+    threshold = None
+    if fail_on_regression is not None:
+        if fail_on_regression.lower() not in SEVERITY_FROM_STR:
+            console.print(
+                f"[red]오류:[/red] --fail-on-regression='{fail_on_regression}' 는 "
+                f"알 수 없는 값입니다. 허용값: {sorted(SEVERITY_FROM_STR)}"
+            )
+            raise typer.Exit(code=64)
+        threshold = SEVERITY_FROM_STR[fail_on_regression.lower()]
+
+    try:
+        old_data = diffmod.load_report(old)
+        new_data = diffmod.load_report(new)
+    except (OSError, ValueError) as exc:
+        console.print(f"[red]오류:[/red] {exc}")
+        raise typer.Exit(code=64) from exc
+
+    result = diffmod.diff_reports(old_data, new_data)
+
+    if not no_console:
+        diffmod.to_console(result, console, redact_ips=redact)
+    if json_out:
+        diffmod.to_json(result, json_out)
+        console.log(f"diff JSON 저장: {json_out}")
+    if md_out:
+        diffmod.to_markdown(result, md_out, redact_ips=redact)
+        console.log(f"diff Markdown 저장: {md_out}")
+
+    if threshold is not None and result.has_regression(threshold):
+        console.log(
+            f"[red]회귀 감지:[/red] {fail_on_regression} 이상으로 새로 악화된 항목이 있습니다."
+        )
+        raise typer.Exit(code=2)
 
 
 if __name__ == "__main__":

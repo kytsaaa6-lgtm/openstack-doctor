@@ -119,6 +119,38 @@ openstack-doctor collect-node \
   --role compute
 ```
 
+## 두 시점 비교 — "언제부터 망가졌나" (`diff`)
+
+진단을 주기적으로 돌리면서 `--json` 으로 리포트를 남겨 두면, 두 시점의
+리포트를 비교해 **무엇이 새로 깨졌고(added) / 고쳐졌고(resolved) /
+심각도가 바뀌었는지(changed)** 를 바로 볼 수 있습니다. OpenStack 호출은
+전혀 하지 않고 로컬 JSON 두 개만 읽으므로 **항상 안전**합니다.
+
+```bash
+# 1) 평소에 진단 결과를 시점별로 남겨 둠
+openstack-doctor diagnose --cloud prod --json reports/2026-06-29.json
+# (다음 날)
+openstack-doctor diagnose --cloud prod --json reports/2026-06-30.json
+
+# 2) 두 시점 비교
+openstack-doctor diff reports/2026-06-29.json reports/2026-06-30.json \
+  --markdown drift.md --json drift.json
+
+# 3) CI 게이팅: error 이상으로 '새로 악화'된 게 있으면 exit 2
+openstack-doctor diff old.json new.json --fail-on-regression error
+```
+
+출력은 (1) 전체 방향(`REGRESSED` / `IMPROVED` / `same`), (2) 체크별
+severity 전이 표, (3) 신규/해소/변경 finding 목록입니다. 같은 finding
+(같은 `check`+`title`+`resource`)의 severity 가 움직이면 resolved+added 가
+아니라 하나의 `changed` 로 매칭됩니다.
+
+- `--fail-on-regression <warn|error|critical>`: 해당 심각도 **이상으로
+  새로 추가되거나 악화된** 항목이 있을 때만 종료 코드 `2`. (단순히 기존부터
+  나쁘던 항목은 회귀로 보지 않음 — 해소된 항목도 영향 없음.)
+- `--markdown` / `--json`: PR·이슈에 붙이거나 머신 파싱용으로 저장.
+- `--redact`: 리포트의 IP/리소스 식별자 마스킹.
+
 ## 어떤 패턴을 잡아내나
 
 - **Nova**
@@ -208,6 +240,6 @@ pytest -ra           # 회귀 테스트 (tests/)
 
 - RabbitMQ 큐 깊이 점검 (controller SSH 후 `rabbitmqctl list_queues`)
 - placement / cells_v2 mapping 일관성 점검
-- 두 시점 리포트 `diff` (“언제부터 망가졌나”)
+- ~~두 시점 리포트 `diff` (“언제부터 망가졌나”)~~ → **구현됨** (`openstack-doctor diff`)
 - Slack / GitLab MR 자동 코멘트 (CI 의 `--fail-on` 와 결합)
 - Amphora → Nova 인스턴스 교차 추적 (amphora compute_id 로 Nova 인스턴스 직접 조회)
